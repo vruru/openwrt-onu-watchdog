@@ -1,0 +1,272 @@
+#!/bin/sh
+
+TAG=onu-watchdog
+STATE_FILE=/etc/onu-watchdog.last_reboot
+
+if command -v uci >/dev/null 2>&1 && uci -q get onu_watchdog.main >/dev/null 2>&1; then
+	MODEM_URL="$(uci -q get onu_watchdog.main.modem_url)"
+	MODEM_PASSWORD="$(uci -q get onu_watchdog.main.modem_password)"
+	WAN_INTERFACE="$(uci -q get onu_watchdog.main.wan_interface)"
+	CHECK_INTERVAL="$(uci -q get onu_watchdog.main.check_interval)"
+	FAIL_SECONDS="$(uci -q get onu_watchdog.main.fail_seconds)"
+	POST_REBOOT_WAIT="$(uci -q get onu_watchdog.main.post_reboot_wait)"
+	REBOOT_COOLDOWN="$(uci -q get onu_watchdog.main.reboot_cooldown)"
+elif [ -r /etc/onu-watchdog.conf ]; then
+	. /etc/onu-watchdog.conf
+else
+	logger -t "$TAG" "configuration is missing"
+	exit 1
+fi
+
+: "${MODEM_URL:=http://192.168.1.1}"
+: "${WAN_INTERFACE:=WAN}"
+: "${CHECK_INTERVAL:=10}"
+: "${FAIL_SECONDS:=60}"
+: "${POST_REBOOT_WAIT:=300}"
+: "${REBOOT_COOLDOWN:=21600}"
+
+[ -n "$MODEM_PASSWORD" ] || {
+	logger -t "$TAG" "modem password is empty"
+	exit 1
+}
+
+log()
+{
+	logger -t "$TAG" "$*"
+}
+
+wan_device()
+{
+	ubus call "network.interface.$WAN_INTERFACE" status 2>/dev/null |
+		jsonfilter -e '@.l3_device' 2>/dev/null
+}
+
+internet_ok()
+{
+	local status dev
+	status="$(ubus call "network.interface.$WAN_INTERFACE" status 2>/dev/null)" || return 1
+	[ "$(printf '%s' "$status" | jsonfilter -e '@.up' 2>/dev/null)" = "true" ] || return 1
+	dev="$(printf '%s' "$status" | jsonfilter -e '@.l3_device' 2>/dev/null)"
+	[ -n "$dev" ] || return 1
+
+	ping -4 -I "$dev" -c 1 -W 2 223.5.5.5 >/dev/null 2>&1 && return 0
+	ping -4 -I "$dev" -c 1 -W 2 119.29.29.29 >/dev/null 2>&1 && return 0
+	return 1
+}
+
+modem_reboot()
+(
+	local work jar login_page login_reply dev_page reply token rand hash data session_token http_code
+	local aes_key aes_iv key_hex iv_hex plain plain_len padding encoded_key encoded_params
+	work="$(mktemp -d /tmp/onu-reboot.XXXXXX)" || return 1
+	jar="$work/cookies"
+	login_page="$work/login.html"
+	login_reply="$work/login-reply.html"
+	dev_page="$work/device.html"
+	reply="$work/reboot-reply.html"
+
+	trap 'rm -rf "$work"' EXIT INT TERM
+
+	curl -fsS --max-time 8 -A 'Mozilla/5.0' -c "$jar" "$MODEM_URL/" -o "$login_page" || {
+		log "modem login page is unreachable"
+		return 1
+	}
+	token="$(sed -n 's/.*Frm_Loginchecktoken.*value = "\([^"]*\)".*/\1/p' "$login_page" | head -n 1)"
+	[ -n "$token" ] || {
+		log "could not parse modem login token"
+		return 1
+	}
+
+	rand="$(awk 'BEGIN{srand(); printf "%d", 10000000+int(rand()*89999999)}')"
+	hash="$(printf '%s%s' "$MODEM_PASSWORD" "$rand" | sha256sum | cut -d' ' -f1)"
+	data="Frm_Logintoken=1&Frm_Loginchecktoken=$token&_cu_url=0&Right=2&Username=&UserRandomNum=$rand&Password=$hash&action=login&accountType="
+
+	http_code="$(curl -sS --max-time 10 -A 'Mozilla/5.0' -e "$MODEM_URL/" \
+		-H 'Content-Type: application/x-www-form-urlencoded' -b "$jar" -c "$jar" \
+		--data "$data" -o "$login_reply" -w '%{http_code}' "$MODEM_URL/")" || {
+		log "modem login request failed"
+		return 1
+	}
+	[ "$http_code" = "200" ] && grep -q 'SID' "$jar" || {
+		log "modem login was rejected (HTTP $http_code)"
+		return 1
+	}
+
+	# The web UI expects these pages to be opened in this order before a form post.
+	curl -fsS --max-time 8 -A 'Mozilla/5.0' -e "$MODEM_URL/" -b "$jar" -c "$jar" \
+		"$MODEM_URL/unicom.html" -o "$work/unicom.html" || return 1
+	curl -fsS --max-time 8 -A 'Mozilla/5.0' -e "$MODEM_URL/unicom.html" -b "$jar" -c "$jar" \
+		"$MODEM_URL/template.gch?pid=1002&nextpage=status_dev_info_t.gch" -o "$work/status.html" || return 1
+	curl -fsS --max-time 8 -A 'Mozilla/5.0' -e "$MODEM_URL/unicom.html" -b "$jar" -c "$jar" \
+		"$MODEM_URL/getpage.gch?pid=1002&nextpage=manager_dev_conf_t_user.gch" -o "$dev_page" || {
+		log "could not open modem device-management page"
+		return 1
+	}
+
+	session_token="$(sed -n 's/.*var session_token = "\([^"]*\)".*/\1/p' "$dev_page" | head -n 1)"
+	[ -n "$session_token" ] || {
+		log "could not parse modem session token"
+		return 1
+	}
+
+	# The page encrypts every management form before submitting it.  IF_ENCODE is
+	# an RSA/PKCS#1-v1.5 wrapped one-time AES key and IV; IF_ENCODEPARAM is the
+	# AES-256-CBC/ZeroPadding encrypted form payload.
+	printf '%s\n' \
+		'-----BEGIN PUBLIC KEY-----' \
+		'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAodPTerkUVCYmv28SOfRV' \
+		'7UKHVujx/HjCUTAWy9l0L5H0JV0LfDudTdMNPEKloZsNam3YrtEnq6jqMLJV4ASb' \
+		'1d6axmIgJ636wyTUS99gj4BKs6bQSTUSE8h/QkUYv4gEIt3saMS0pZpd90y6+B/9' \
+		'hZxZE/RKU8e+zgRqp1/762TB7vcjtjOwXRDEL0w71Jk9i8VUQ59MR1Uj5E8X3WIc' \
+		'fYSK5RWBkMhfaTRM6ozS9Bqhi40xlSOb3GBxCmliCifOJNLoO9kFoWgAIw5hkSIb' \
+		'GH+4Csop9Uy8VvmmB+B3ubFLN35qIa5OG5+SDXn4L7FeAA5lRiGxRi8tsWrtew8w' \
+		'nwIDAQAB' \
+		'-----END PUBLIC KEY-----' > "$work/public.pem"
+
+	aes_key="$(awk 'BEGIN{srand(); for(i=0;i<16;i++) printf "%d", int(rand()*10)}')"
+	aes_iv="$(awk -v seed="$(date +%s)$$" 'BEGIN{srand(seed); for(i=0;i<16;i++) printf "%d", int(rand()*10)}')"
+	key_hex="$(printf '%s' "$aes_key" | sha256sum | cut -d' ' -f1)"
+	iv_hex="$(printf '%s' "$aes_iv" | sha256sum | cut -d' ' -f1 | cut -c1-32)"
+	plain="IF_ACTION=devrestart&IF_ERRORSTR=SUCC&IF_ERRORPARAM=SUCC&IF_ERRORTYPE=-1&flag=1&_SESSION_TOKEN=$session_token"
+	printf '%s' "$plain" > "$work/plain.bin"
+	plain_len=${#plain}
+	padding=$(( (16 - (plain_len % 16)) % 16 ))
+	while [ "$padding" -gt 0 ]; do
+		printf '\000' >> "$work/plain.bin"
+		padding=$((padding - 1))
+	done
+
+	encoded_key="$(printf '%s' "$aes_key+$aes_iv" |
+		openssl pkeyutl -encrypt -pubin -inkey "$work/public.pem" \
+			-pkeyopt rsa_padding_mode:pkcs1 2>/dev/null |
+		openssl base64 -A)" || return 1
+	encoded_params="$(openssl enc -aes-256-cbc -K "$key_hex" -iv "$iv_hex" -nopad \
+		-in "$work/plain.bin" 2>/dev/null | openssl base64 -A)" || return 1
+	[ -n "$encoded_key" ] && [ -n "$encoded_params" ] || {
+		log "could not encrypt modem reboot form"
+		return 1
+	}
+
+	http_code="$(curl -sS --max-time 12 -A 'Mozilla/5.0' \
+		-e "$MODEM_URL/getpage.gch?pid=1002&nextpage=manager_dev_conf_t_user.gch" \
+		-H 'Content-Type: application/x-www-form-urlencoded' -b "$jar" -c "$jar" \
+		--data-urlencode "IF_ENCODE=$encoded_key" \
+		--data-urlencode "IF_ENCODEPARAM=$encoded_params" \
+		-o "$reply" -w '%{http_code}' \
+		"$MODEM_URL/getpage.gch?pid=1002&nextpage=manager_dev_conf_t_user.gch")"
+
+	# A connection reset/timeout immediately after POST can mean the reboot already began.
+	if [ "$http_code" = "200" ]; then
+		log "modem accepted reboot command"
+		return 0
+	fi
+
+	log "reboot POST returned HTTP ${http_code:-none}"
+	return 1
+)
+
+last_reboot()
+{
+	[ -r "$STATE_FILE" ] && sed -n '1p' "$STATE_FILE" || printf '0\n'
+}
+
+record_reboot()
+{
+	local now="$1"
+	printf '%s\n' "$now" > "$STATE_FILE"
+	chmod 600 "$STATE_FILE"
+}
+
+run_daemon()
+{
+	local fail_since=0 now last elapsed quiet_until=0 candidate_quiet=0 cooldown_reported=0
+	last="$(last_reboot)"
+	now="$(date +%s)"
+	[ "$last" -gt 0 ] 2>/dev/null && quiet_until=$((last + POST_REBOOT_WAIT))
+	log "started: fail=${FAIL_SECONDS}s post-reboot-wait=${POST_REBOOT_WAIT}s cooldown=${REBOOT_COOLDOWN}s"
+
+	while true; do
+		now="$(date +%s)"
+		# A manual UI reboot runs in a short-lived process.  Pick up its persisted
+		# timestamp so this daemon also enters the full post-reboot quiet period.
+		if [ -r "$STATE_FILE" ]; then
+			IFS= read -r last < "$STATE_FILE"
+			if [ "$last" -gt 0 ] 2>/dev/null; then
+				candidate_quiet=$((last + POST_REBOOT_WAIT))
+				if [ "$candidate_quiet" -gt "$quiet_until" ]; then
+					quiet_until="$candidate_quiet"
+					fail_since=0
+				fi
+			fi
+		fi
+		if [ "$now" -lt "$quiet_until" ] 2>/dev/null; then
+			sleep "$CHECK_INTERVAL"
+			continue
+		fi
+
+		if internet_ok; then
+			if [ "$fail_since" -ne 0 ]; then
+				log "internet recovered before reboot threshold"
+			fi
+			fail_since=0
+			cooldown_reported=0
+		else
+			if [ "$fail_since" -eq 0 ]; then
+				fail_since="$now"
+				log "internet check failed; starting 60-second confirmation window"
+			else
+				elapsed=$((now - fail_since))
+				if [ "$elapsed" -ge "$FAIL_SECONDS" ]; then
+					last="$(last_reboot)"
+					if [ "$last" -gt 0 ] 2>/dev/null && [ $((now - last)) -lt "$REBOOT_COOLDOWN" ]; then
+						if [ "$cooldown_reported" -eq 0 ]; then
+							log "internet is still down, but reboot cooldown is active"
+							cooldown_reported=1
+						fi
+					else
+						log "internet down for ${elapsed}s; sending modem reboot command"
+						if modem_reboot; then
+							record_reboot "$now"
+							quiet_until=$((now + POST_REBOOT_WAIT))
+							fail_since=0
+							cooldown_reported=0
+							log "checks suspended for ${POST_REBOOT_WAIT}s"
+						else
+							log "modem reboot command failed; will retry after a new confirmation window"
+							fail_since="$now"
+						fi
+					fi
+				fi
+			fi
+		fi
+		sleep "$CHECK_INTERVAL"
+	done
+}
+
+case "${1:-daemon}" in
+	daemon)
+		run_daemon
+		;;
+	check)
+		if internet_ok; then
+			echo "internet: ok (device $(wan_device))"
+		else
+			echo "internet: failed"
+			exit 1
+		fi
+		;;
+	reboot-now)
+		now="$(date +%s)"
+		if modem_reboot; then
+			record_reboot "$now"
+			echo "reboot command accepted; wait ${POST_REBOOT_WAIT}s"
+		else
+			echo "reboot command failed" >&2
+			exit 1
+		fi
+		;;
+	*)
+		echo "usage: $0 {daemon|check|reboot-now}" >&2
+		exit 2
+		;;
+esac

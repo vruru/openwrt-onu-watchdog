@@ -1,0 +1,20 @@
+{
+	"luci-app-onu-watchdog": {
+		"description": "管理光猫断线看门狗",
+		"read": {
+			"file": {
+				"/usr/sbin/onu-watchdog": [ "exec" ],
+				"/etc/init.d/onu-watchdog": [ "exec" ],
+				"/sbin/logread": [ "exec" ]
+			},
+			"uci": [ "onu_watchdog" ]
+		},
+		"write": {
+			"file": {
+				"/usr/sbin/onu-watchdog": [ "exec" ],
+				"/etc/init.d/onu-watchdog": [ "exec" ]
+			},
+			"uci": [ "onu_watchdog" ]
+		}
+	}
+}
