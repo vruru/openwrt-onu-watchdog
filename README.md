@@ -16,10 +16,10 @@ LuCI 页面位于：`服务 → 光猫断线看门狗`。
 
 ## 从私有 GitHub 仓库一键安装
 
-私有仓库不能匿名下载。先创建一个仅对此仓库具有 `Contents: Read-only` 权限的 Fine-grained Personal Access Token，然后在 OpenWrt SSH 终端执行下面一行，将 `github_pat_xxx` 替换为该只读 Token：
+私有仓库不能匿名下载。先创建一个仅对此仓库具有 `Contents: Read-only` 权限的 Fine-grained Personal Access Token，然后在 OpenWrt SSH 终端执行下面一行。命令会隐式读取 Token，不会把它写进 shell 历史；随后安装程序会继续提示输入光猫密码：
 
 ```sh
-GITHUB_TOKEN='github_pat_xxx' sh -c 'd=$(mktemp -d) || exit 1; trap '\''rm -rf "$d"'\'' EXIT; curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" https://api.github.com/repos/vruru/openwrt-onu-watchdog/tarball/main | tar -xz -C "$d" && p=$(find "$d" -mindepth 2 -maxdepth 2 -name install.sh -print -quit) && sh "$p"'
+printf 'GitHub 只读 Token：'; stty -echo; IFS= read -r GITHUB_TOKEN; stty echo; printf '\n'; export GITHUB_TOKEN; sh -c 'command -v curl >/dev/null 2>&1 || { opkg update && opkg install curl; }; d=$(mktemp -d) || exit 1; trap '\''rm -rf "$d"'\'' EXIT; curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" https://api.github.com/repos/vruru/openwrt-onu-watchdog/tarball/main | tar -xz -C "$d" && p=$(find "$d" -name install.sh | head -n 1) && [ -n "$p" ] && sh "$p"'
 ```
 
 首次安装会在终端提示输入光猫普通管理密码。密码只写入 OpenWrt 本机的 `/etc/config/onu_watchdog`，权限为 `600`，不会进入 GitHub 仓库。
