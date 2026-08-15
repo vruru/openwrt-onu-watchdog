@@ -39,6 +39,8 @@ for file in \
 	/usr/sbin/onu-watchdog \
 	/etc/init.d/onu-watchdog \
 	/etc/config/onu_watchdog \
+	/etc/config/network \
+	/etc/config/firewall \
 	/usr/share/luci/menu.d/luci-app-onu-watchdog.json \
 	/usr/share/rpcd/acl.d/luci-app-onu-watchdog.json \
 	/www/luci-static/resources/view/services/onu-watchdog.js; do
@@ -83,6 +85,58 @@ if [ ! -e /etc/config/onu_watchdog ]; then
 fi
 
 chmod 600 /etc/config/onu_watchdog
+
+# Recreate the management path to a bridge-mode ONU after a clean OpenWrt
+# installation.  Existing MODEM/firewall sections are never overwritten.
+network_changed=0
+firewall_changed=0
+if ! uci -q get network.MODEM >/dev/null 2>&1; then
+	WAN_DEVICE="${MODEM_DEVICE:-$(uci -q get network.WAN.device || true)}"
+	if [ -z "$WAN_DEVICE" ] && [ -t 0 ]; then
+		printf '请输入 PPPoE WAN 使用的物理网卡（例如 eth1）：'
+		IFS= read -r WAN_DEVICE
+	fi
+	[ -n "$WAN_DEVICE" ] || {
+		echo "无法确定 WAN 物理网卡，请设置 MODEM_DEVICE 后重新运行。" >&2
+		exit 1
+	}
+	uci set network.MODEM='interface'
+	uci set network.MODEM.proto='static'
+	uci set network.MODEM.device="$WAN_DEVICE"
+	uci set network.MODEM.ipaddr='192.168.1.2'
+	uci set network.MODEM.netmask='255.255.255.0'
+	uci set network.MODEM.defaultroute='0'
+	uci set network.MODEM.peerdns='0'
+	uci set network.MODEM.delegate='0'
+	uci commit network
+	network_changed=1
+fi
+
+if ! uci -q get firewall.modem >/dev/null 2>&1; then
+	uci set firewall.modem='zone'
+	uci set firewall.modem.name='modem'
+	uci set firewall.modem.input='REJECT'
+	uci set firewall.modem.output='ACCEPT'
+	uci set firewall.modem.forward='REJECT'
+	uci set firewall.modem.masq='1'
+	uci add_list firewall.modem.network='MODEM'
+	firewall_changed=1
+fi
+
+if ! uci -q get firewall.lan_to_modem >/dev/null 2>&1; then
+	uci set firewall.lan_to_modem='forwarding'
+	uci set firewall.lan_to_modem.src='lan'
+	uci set firewall.lan_to_modem.dest='modem'
+	firewall_changed=1
+fi
+
+if [ "$firewall_changed" = "1" ]; then
+	uci commit firewall
+fi
+
+[ "$network_changed" = "0" ] || /etc/init.d/network reload
+[ "$firewall_changed" = "0" ] || /etc/init.d/firewall reload
+
 rm -f /tmp/luci-indexcache
 rm -rf /tmp/luci-modulecache/* 2>/dev/null || true
 /etc/init.d/rpcd restart

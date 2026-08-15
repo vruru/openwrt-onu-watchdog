@@ -24,6 +24,8 @@ printf 'GitHub 只读 Token：'; stty -echo; IFS= read -r GITHUB_TOKEN; stty ech
 
 首次安装会在终端提示输入光猫普通管理密码。密码只写入 OpenWrt 本机的 `/etc/config/onu_watchdog`，权限为 `600`，不会进入 GitHub 仓库。
 
+在全新系统上，安装器还会自动识别 `network.WAN.device`，创建光猫管理接口 `MODEM`（`192.168.1.2/24`）以及 `lan → modem` 防火墙规则；已有同名配置不会被覆盖。如果 WAN 物理设备无法自动识别，安装器会提示输入，例如 `eth1`。
+
 如果系统没有 `curl`、`openssl` 或 `jsonfilter`，安装脚本会通过 `opkg` 自动补齐。
 
 ## 本地安装
