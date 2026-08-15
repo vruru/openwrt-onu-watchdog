@@ -62,26 +62,6 @@ chmod 644 \
 
 if [ ! -e /etc/config/onu_watchdog ]; then
 	cp "$ROOT/onu_watchdog.uci" /etc/config/onu_watchdog
-
-	if [ -z "${MODEM_PASSWORD:-}" ]; then
-		if [ -t 0 ]; then
-			printf '请输入光猫普通管理密码：'
-			stty -echo
-			IFS= read -r MODEM_PASSWORD
-			stty echo
-			printf '\n'
-		else
-			echo "首次安装请在交互式终端运行，或通过 MODEM_PASSWORD 环境变量传入密码。" >&2
-			exit 1
-		fi
-	fi
-
-	[ -n "$MODEM_PASSWORD" ] || {
-		echo "光猫密码不能为空。" >&2
-		exit 1
-	}
-	uci set onu_watchdog.main.modem_password="$MODEM_PASSWORD"
-	uci commit onu_watchdog
 fi
 
 chmod 600 /etc/config/onu_watchdog
@@ -144,11 +124,15 @@ rm -rf /tmp/luci-modulecache/* 2>/dev/null || true
 /etc/init.d/onu-watchdog restart
 
 sleep 2
-if /etc/init.d/onu-watchdog status >/dev/null 2>&1; then
-	echo "安装完成，光猫断线看门狗正在运行。"
+if [ "$(uci -q get onu_watchdog.main.enabled)" = "1" ]; then
+	if /etc/init.d/onu-watchdog status >/dev/null 2>&1; then
+		echo "安装完成，已有配置已保留，光猫断线看门狗正在运行。"
+	else
+		echo "文件已安装，但已有配置要求启动而服务没有运行，请检查：logread -e onu-watchdog" >&2
+		exit 1
+	fi
 else
-	echo "文件已安装，但服务没有运行，请检查：logread -e onu-watchdog" >&2
-	exit 1
+	echo "插件安装完成。请进入 LuCI 填写光猫地址和密码，然后勾选启用并保存。"
 fi
 
 LAN_IP="$(uci -q get network.lan.ipaddr || true)"

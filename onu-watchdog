@@ -25,11 +25,6 @@ fi
 : "${POST_REBOOT_WAIT:=300}"
 : "${REBOOT_COOLDOWN:=21600}"
 
-[ -n "$MODEM_PASSWORD" ] || {
-	logger -t "$TAG" "modem password is empty"
-	exit 1
-}
-
 log()
 {
 	logger -t "$TAG" "$*"
@@ -58,6 +53,10 @@ modem_reboot()
 (
 	local work jar login_page login_reply dev_page reply token rand hash data session_token http_code
 	local aes_key aes_iv key_hex iv_hex plain plain_len padding encoded_key encoded_params
+	[ -n "$MODEM_PASSWORD" ] && [ "$MODEM_PASSWORD" != "REPLACE_WITH_MODEM_PASSWORD" ] || {
+		log "modem password is empty; configure it in LuCI first"
+		return 1
+	}
 	work="$(mktemp -d /tmp/onu-reboot.XXXXXX)" || return 1
 	jar="$work/cookies"
 	login_page="$work/login.html"

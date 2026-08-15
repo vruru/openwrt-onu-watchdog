@@ -14,19 +14,19 @@
 
 LuCI 页面位于：`服务 → 光猫断线看门狗`。
 
-## 从私有 GitHub 仓库一键安装
+## 一键安装
 
-私有仓库不能匿名下载。先创建一个仅对此仓库具有 `Contents: Read-only` 权限的 Fine-grained Personal Access Token，然后在 OpenWrt SSH 终端执行下面一行。命令会隐式读取 Token，不会把它写进 shell 历史；随后安装程序会继续提示输入光猫密码：
+在 OpenWrt SSH 终端执行：
 
 ```sh
-printf 'GitHub 只读 Token：'; stty -echo; IFS= read -r GITHUB_TOKEN; stty echo; printf '\n'; export GITHUB_TOKEN; sh -c 'command -v curl >/dev/null 2>&1 || { opkg update && opkg install curl; }; d=$(mktemp -d) || exit 1; trap '\''rm -rf "$d"'\'' EXIT; curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" https://api.github.com/repos/vruru/openwrt-onu-watchdog/tarball/main | tar -xz -C "$d" && p=$(find "$d" -name install.sh | head -n 1) && [ -n "$p" ] && sh "$p"'
+wget -qO- https://raw.githubusercontent.com/vruru/openwrt-onu-watchdog/main/bootstrap.sh | sh
 ```
 
-首次安装会在终端提示输入光猫普通管理密码。密码只写入 OpenWrt 本机的 `/etc/config/onu_watchdog`，权限为 `600`，不会进入 GitHub 仓库。
+安装完成后打开 `服务 → 光猫断线看门狗`，填写光猫管理地址和普通管理密码，勾选启用并保存。密码只写入 OpenWrt 本机的 `/etc/config/onu_watchdog`，权限为 `600`，不会进入 GitHub 仓库。
 
 在全新系统上，安装器还会自动识别 `network.WAN.device`，创建光猫管理接口 `MODEM`（`192.168.1.2/24`）以及 `lan → modem` 防火墙规则；已有同名配置不会被覆盖。如果 WAN 物理设备无法自动识别，安装器会提示输入，例如 `eth1`。
 
-如果系统没有 `curl`、`openssl` 或 `jsonfilter`，安装脚本会通过 `opkg` 自动补齐。
+如果系统没有 `curl`、`openssl` 或 `jsonfilter`，安装脚本会通过 `opkg` 自动补齐。系统只需具备 OpenWrt 默认自带的 `wget` 或 `uclient-fetch` 即可启动安装。
 
 ## 本地安装
 
@@ -59,6 +59,5 @@ PURGE=1 sh uninstall.sh
 ## 安全说明
 
 - 不要从 WAN 开放光猫管理页面或 LuCI 页面。
-- GitHub Token 只需此私有仓库的只读权限，不应赋予写权限。
 - 自动重启不能修复光猫 Web 服务也完全卡死的情况；这种情况需要可远程断电的智能插座。
 - 当前加密公钥来自上述型号与固件的 `/js/code.js`。更换光猫或固件后应重新验证重启接口。
