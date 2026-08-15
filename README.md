@@ -19,14 +19,14 @@ LuCI 页面位于：`服务 → 光猫断线看门狗`。
 在 OpenWrt SSH 终端执行：
 
 ```sh
-wget -qO- https://raw.githubusercontent.com/vruru/openwrt-onu-watchdog/main/bootstrap.sh | sh
+sh -c 'u=https://raw.githubusercontent.com/vruru/openwrt-onu-watchdog/main/bootstrap.sh; if command -v wget >/dev/null 2>&1; then wget -qO- "$u"; elif command -v uclient-fetch >/dev/null 2>&1; then uclient-fetch -q -O - "$u"; elif command -v curl >/dev/null 2>&1; then curl -fsSL "$u"; else opkg update && opkg install curl ca-bundle >/dev/null && curl -fsSL "$u"; fi' | sh
 ```
 
 安装完成后打开 `服务 → 光猫断线看门狗`，填写光猫管理地址和普通管理密码，勾选启用并保存。密码只写入 OpenWrt 本机的 `/etc/config/onu_watchdog`，权限为 `600`，不会进入 GitHub 仓库。
 
 在全新系统上，安装器还会自动识别 `network.WAN.device`，创建光猫管理接口 `MODEM`（`192.168.1.2/24`）以及 `lan → modem` 防火墙规则；已有同名配置不会被覆盖。如果 WAN 物理设备无法自动识别，安装器会提示输入，例如 `eth1`。
 
-如果系统没有 `curl`、`openssl` 或 `jsonfilter`，安装脚本会通过 `opkg` 自动补齐。系统只需具备 OpenWrt 默认自带的 `wget` 或 `uclient-fetch` 即可启动安装。
+启动命令会依次尝试 `wget`、`uclient-fetch` 和 `curl`；三者都不存在时会通过 `opkg` 自动安装 `curl`。进入安装器后，缺少的 `openssl`、`jsonfilter` 等依赖也会自动补齐。
 
 ## 本地安装
 

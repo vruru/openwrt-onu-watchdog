@@ -13,8 +13,14 @@ elif command -v uclient-fetch >/dev/null 2>&1; then
 elif command -v curl >/dev/null 2>&1; then
 	curl -fsSL "$ARCHIVE_URL" -o "$WORK/source.tar.gz"
 else
-	echo "系统缺少 wget、uclient-fetch 和 curl，无法下载安装包。" >&2
-	exit 1
+	echo "未找到下载工具，正在通过 opkg 安装 curl…"
+	command -v opkg >/dev/null 2>&1 || {
+		echo "系统既没有下载工具，也没有 opkg，无法继续安装。" >&2
+		exit 1
+	}
+	opkg update
+	opkg install curl ca-bundle
+	curl -fsSL "$ARCHIVE_URL" -o "$WORK/source.tar.gz"
 fi
 
 tar -xzf "$WORK/source.tar.gz" -C "$WORK"
