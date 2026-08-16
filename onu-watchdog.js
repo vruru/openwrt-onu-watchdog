@@ -4,9 +4,62 @@
 'require fs';
 'require ui';
 
+function parseEvents(text) {
+	return (text || '').trim().split('\n').filter(function(line) {
+		return line.length > 0;
+	}).map(function(line) {
+		var fields = line.split('\t');
+		return {
+			time: Number(fields[0]) || 0,
+			type: fields[1] || 'unknown',
+			source: fields[2] || 'unknown',
+			detail: fields.slice(4).join(' ') || ''
+		};
+	}).filter(function(item) {
+		return item.time > 0;
+	});
+}
+
+function formatTime(epoch) {
+	if (!epoch)
+		return '暂无记录';
+	return new Date(epoch * 1000).toLocaleString('zh-CN', { hour12: false });
+}
+
+function sourceLabel(source) {
+	return ({ automatic: '自动', manual: '手动', system: '系统', unknown: '未知' })[source] || source;
+}
+
+function latest(events, type) {
+	for (var i = events.length - 1; i >= 0; i--)
+		if (events[i].type === type)
+			return events[i];
+	return null;
+}
+
+function countSince(events, type, seconds, source) {
+	var start = Math.floor(Date.now() / 1000) - seconds;
+	return events.filter(function(item) {
+		return item.time >= start && item.type === type && (!source || item.source === source);
+	}).length;
+}
+
+function statCard(title, value, note) {
+	return E('div', {
+		'style': 'min-width:190px;flex:1;padding:16px;border:1px solid var(--border-color-medium,#d8d8d8);border-radius:8px;background:var(--background-color-high,#fff)'
+	}, [
+		E('div', { 'style': 'color:var(--text-color-secondary,#666);margin-bottom:8px' }, title),
+		E('div', { 'style': 'font-size:1.35rem;font-weight:600;word-break:break-word' }, value),
+		E('div', { 'style': 'margin-top:6px;color:var(--text-color-secondary,#777);font-size:.9rem' }, note || '')
+	]);
+}
+
 return view.extend({
 	load: function() {
-		return L.resolveDefault(fs.exec('/etc/init.d/onu-watchdog', [ 'status' ]), { code: 1, stdout: '' });
+		return Promise.all([
+			L.resolveDefault(fs.exec('/etc/init.d/onu-watchdog', [ 'status' ]), { code: 1, stdout: '' }),
+			L.resolveDefault(fs.exec('/usr/sbin/onu-watchdog', [ 'events' ]), { code: 1, stdout: '' })
+		]);
 	},
 
 	handleCheck: function(ev) {
@@ -57,8 +110,23 @@ return view.extend({
 		});
 	},
 
-	render: function(serviceStatus) {
+	render: function(data) {
 		var m, s, o;
+		var serviceStatus = data[0];
+		var events = parseEvents(data[1].stdout);
+		var lastOutage = latest(events, 'offline_started');
+		var lastReboot = latest(events, 'reboot_accepted');
+		var sevenDays = 7 * 86400;
+		var thirtyDays = 30 * 86400;
+		var summary = E('div', { 'style': 'display:flex;flex-wrap:wrap;gap:12px;margin:0 0 18px' }, [
+			statCard('最近一次断线', formatTime(lastOutage && lastOutage.time), lastOutage ? lastOutage.detail : '尚未检测到断线'),
+			statCard('最近一次重启', formatTime(lastReboot && lastReboot.time), lastReboot ? sourceLabel(lastReboot.source) + '重启' : '尚未触发重启'),
+			statCard('最近7天', '%d 次断线'.format(countSince(events, 'offline_started', sevenDays)),
+				'%d 次自动重启'.format(countSince(events, 'reboot_accepted', sevenDays, 'automatic'))),
+			statCard('最近30天', '%d 次断线'.format(countSince(events, 'offline_started', thirtyDays)),
+				'%d 次自动重启'.format(countSince(events, 'reboot_accepted', thirtyDays, 'automatic')))
+		]);
+
 		m = new form.Map('onu_watchdog', '光猫断线看门狗',
 			'外网连续不可用达到设定时间后，自动登录光猫并发送重启命令。后台只保留一个轻量 shell 进程，状态变量固定，不会随运行时间增加内存占用。');
 
@@ -123,6 +191,8 @@ return view.extend({
 		o.inputstyle = 'negative';
 		o.onclick = this.handleReboot;
 
-		return m.render();
+		return Promise.resolve(m.render()).then(function(rendered) {
+			return E([], [ summary, rendered ]);
+		});
 	}
 });

@@ -54,30 +54,6 @@ function sourceLabel(source) {
 	return ({ automatic: '自动', manual: '手动', system: '系统', unknown: '未知' })[source] || source;
 }
 
-function latest(events, type) {
-	for (var i = events.length - 1; i >= 0; i--)
-		if (events[i].type === type)
-			return events[i];
-	return null;
-}
-
-function countSince(events, type, seconds, source) {
-	var start = Math.floor(Date.now() / 1000) - seconds;
-	return events.filter(function(item) {
-		return item.time >= start && item.type === type && (!source || item.source === source);
-	}).length;
-}
-
-function statCard(title, value, note) {
-	return E('div', {
-		'style': 'min-width:190px;flex:1;padding:16px;border:1px solid var(--border-color-medium,#d8d8d8);border-radius:8px;background:var(--background-color-high,#fff)'
-	}, [
-		E('div', { 'style': 'color:var(--text-color-secondary,#666);margin-bottom:8px' }, title),
-		E('div', { 'style': 'font-size:1.35rem;font-weight:600;word-break:break-word' }, value),
-		E('div', { 'style': 'margin-top:6px;color:var(--text-color-secondary,#777);font-size:.9rem' }, note || '')
-	]);
-}
-
 return view.extend({
 	load: function() {
 		return L.resolveDefault(fs.exec('/usr/sbin/onu-watchdog', [ 'events' ]), {
@@ -122,10 +98,6 @@ return view.extend({
 	render: function(result) {
 		var events = parseEvents(result.stdout);
 		var rows = events.slice().reverse().slice(0, 100);
-		var lastOutage = latest(events, 'offline_started');
-		var lastReboot = latest(events, 'reboot_accepted');
-		var sevenDays = 7 * 86400;
-		var thirtyDays = 30 * 86400;
 		var tableRows = rows.map(function(item) {
 			return E('tr', {}, [
 				E('td', {}, formatTime(item.time)),
@@ -143,14 +115,6 @@ return view.extend({
 			E('h2', {}, '光猫断线看门狗 · 事件日志'),
 			E('div', { 'class': 'cbi-map-descr' },
 				'这里只记录断线、恢复和重启等状态变化，不记录每次正常探测。最多保留500条，超限后自动保留最近400条。'),
-			E('div', { 'style': 'display:flex;flex-wrap:wrap;gap:12px;margin:18px 0' }, [
-				statCard('最近一次断线', formatTime(lastOutage && lastOutage.time), lastOutage ? lastOutage.detail : '尚未检测到断线'),
-				statCard('最近一次重启', formatTime(lastReboot && lastReboot.time), lastReboot ? sourceLabel(lastReboot.source) + '重启' : '尚未触发重启'),
-				statCard('最近7天', '%d 次断线'.format(countSince(events, 'offline_started', sevenDays)),
-					'%d 次自动重启'.format(countSince(events, 'reboot_accepted', sevenDays, 'automatic'))),
-				statCard('最近30天', '%d 次断线'.format(countSince(events, 'offline_started', thirtyDays)),
-					'%d 次自动重启'.format(countSince(events, 'reboot_accepted', thirtyDays, 'automatic')))
-			]),
 			E('div', { 'style': 'display:flex;gap:8px;margin:12px 0' }, [
 				E('button', { 'class': 'btn cbi-button-action', 'click': ui.createHandlerFn(this, 'handleRefresh') }, '刷新'),
 				E('button', { 'class': 'btn cbi-button-negative', 'click': ui.createHandlerFn(this, 'handleClear') }, '清空日志')
