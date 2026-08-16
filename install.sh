@@ -39,11 +39,14 @@ for file in \
 	/usr/sbin/onu-watchdog \
 	/etc/init.d/onu-watchdog \
 	/etc/config/onu_watchdog \
+	/etc/onu-watchdog.last_reboot \
+	/etc/onu-watchdog.events \
 	/etc/config/network \
 	/etc/config/firewall \
 	/usr/share/luci/menu.d/luci-app-onu-watchdog.json \
 	/usr/share/rpcd/acl.d/luci-app-onu-watchdog.json \
-	/www/luci-static/resources/view/services/onu-watchdog.js; do
+	/www/luci-static/resources/view/services/onu-watchdog.js \
+	/www/luci-static/resources/view/services/onu-watchdog-log.js; do
 	[ ! -e "$file" ] || cp -a "$file" "$BACKUP_DIR/"
 done
 
@@ -53,12 +56,14 @@ mkdir -p /usr/share/luci/menu.d /usr/share/rpcd/acl.d /www/luci-static/resources
 cp "$ROOT/luci-app-onu-watchdog.menu.json" /usr/share/luci/menu.d/luci-app-onu-watchdog.json
 cp "$ROOT/luci-app-onu-watchdog.acl.json" /usr/share/rpcd/acl.d/luci-app-onu-watchdog.json
 cp "$ROOT/onu-watchdog.js" /www/luci-static/resources/view/services/onu-watchdog.js
+cp "$ROOT/onu-watchdog-log.js" /www/luci-static/resources/view/services/onu-watchdog-log.js
 
 chmod 755 /usr/sbin/onu-watchdog /etc/init.d/onu-watchdog
 chmod 644 \
 	/usr/share/luci/menu.d/luci-app-onu-watchdog.json \
 	/usr/share/rpcd/acl.d/luci-app-onu-watchdog.json \
-	/www/luci-static/resources/view/services/onu-watchdog.js
+	/www/luci-static/resources/view/services/onu-watchdog.js \
+	/www/luci-static/resources/view/services/onu-watchdog-log.js
 
 if [ ! -e /etc/config/onu_watchdog ]; then
 	cp "$ROOT/onu_watchdog.uci" /etc/config/onu_watchdog

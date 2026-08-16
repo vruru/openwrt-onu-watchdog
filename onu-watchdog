@@ -2,6 +2,11 @@
 
 TAG=onu-watchdog
 STATE_FILE=/etc/onu-watchdog.last_reboot
+EVENT_FILE=/etc/onu-watchdog.events
+EVENT_LOCK=/var/lock/onu-watchdog-events.lock
+MAX_EVENTS=500
+TRIM_EVENTS=400
+MAX_EVENT_BYTES=131072
 
 if command -v uci >/dev/null 2>&1 && uci -q get onu_watchdog.main >/dev/null 2>&1; then
 	MODEM_URL="$(uci -q get onu_watchdog.main.modem_url)"
@@ -29,6 +34,55 @@ log()
 {
 	logger -t "$TAG" "$*"
 }
+
+clean_event_field()
+{
+	printf '%s' "$1" | tr '\t\r\n' '   '
+}
+
+record_event()
+{
+	record_event_at "$(date +%s)" "$@"
+}
+
+record_event_at()
+(
+	local event_time event_type source duration detail lines bytes tmp
+	event_time="$1"
+	event_type="$(clean_event_field "$2")"
+	source="$(clean_event_field "${3:-system}")"
+	duration="${4:-0}"
+	detail="$(clean_event_field "${5:-}")"
+
+	exec 9>"$EVENT_LOCK"
+	flock -x 9
+	printf '%s\t%s\t%s\t%s\t%s\n' \
+		"$event_time" "$event_type" "$source" "$duration" "$detail" >> "$EVENT_FILE"
+	chmod 600 "$EVENT_FILE"
+
+	lines="$(wc -l < "$EVENT_FILE")"
+	bytes="$(wc -c < "$EVENT_FILE")"
+	if [ "$lines" -gt "$MAX_EVENTS" ] || [ "$bytes" -gt "$MAX_EVENT_BYTES" ]; then
+		tmp="${EVENT_FILE}.tmp.$$"
+		tail -n "$TRIM_EVENTS" "$EVENT_FILE" > "$tmp"
+		chmod 600 "$tmp"
+		mv "$tmp" "$EVENT_FILE"
+	fi
+)
+
+show_events()
+{
+	[ -r "$EVENT_FILE" ] && tail -n "$MAX_EVENTS" "$EVENT_FILE"
+	return 0
+}
+
+clear_events()
+(
+	exec 9>"$EVENT_LOCK"
+	flock -x 9
+	: > "$EVENT_FILE"
+	chmod 600 "$EVENT_FILE"
+)
 
 wan_device()
 {
@@ -166,35 +220,61 @@ modem_reboot()
 
 last_reboot()
 {
-	[ -r "$STATE_FILE" ] && sed -n '1p' "$STATE_FILE" || printf '0\n'
+	[ -r "$STATE_FILE" ] && awk 'NR == 1 { print $1; exit }' "$STATE_FILE" || printf '0\n'
+}
+
+last_reboot_source()
+{
+	[ -r "$STATE_FILE" ] && awk 'NR == 1 { print ($2 != "" ? $2 : "unknown"); exit }' "$STATE_FILE" || printf 'unknown\n'
 }
 
 record_reboot()
 {
 	local now="$1"
-	printf '%s\n' "$now" > "$STATE_FILE"
+	local source="${2:-unknown}"
+	printf '%s %s\n' "$now" "$source" > "$STATE_FILE"
 	chmod 600 "$STATE_FILE"
 }
 
 run_daemon()
 {
-	local fail_since=0 now last elapsed quiet_until=0 candidate_quiet=0 cooldown_reported=0
+	local fail_since=0 now last last_source elapsed quiet_until=0 candidate_quiet=0
+	local cooldown_reported=0 reboot_seen=0 reboot_pending=0 reboot_source=unknown
 	last="$(last_reboot)"
+	last_source="$(last_reboot_source)"
 	now="$(date +%s)"
-	[ "$last" -gt 0 ] 2>/dev/null && quiet_until=$((last + POST_REBOOT_WAIT))
+	if [ ! -e "$EVENT_FILE" ] && [ "$last" -gt 0 ] 2>/dev/null; then
+		record_event_at "$last" reboot_accepted "$last_source" 0 \
+			"升级前保留的最后一次重启记录"
+	fi
+	reboot_seen="$last"
+	if [ "$last" -gt 0 ] 2>/dev/null; then
+		quiet_until=$((last + POST_REBOOT_WAIT))
+		if [ "$now" -lt "$quiet_until" ] 2>/dev/null; then
+			reboot_pending="$last"
+			reboot_source="$last_source"
+		fi
+	fi
 	log "started: fail=${FAIL_SECONDS}s post-reboot-wait=${POST_REBOOT_WAIT}s cooldown=${REBOOT_COOLDOWN}s"
+	record_event service_started system 0 "看门狗服务启动"
 
 	while true; do
 		now="$(date +%s)"
 		# A manual UI reboot runs in a short-lived process.  Pick up its persisted
 		# timestamp so this daemon also enters the full post-reboot quiet period.
 		if [ -r "$STATE_FILE" ]; then
-			IFS= read -r last < "$STATE_FILE"
+			last="$(last_reboot)"
+			last_source="$(last_reboot_source)"
 			if [ "$last" -gt 0 ] 2>/dev/null; then
 				candidate_quiet=$((last + POST_REBOOT_WAIT))
 				if [ "$candidate_quiet" -gt "$quiet_until" ]; then
 					quiet_until="$candidate_quiet"
 					fail_since=0
+				fi
+				if [ "$last" -gt "$reboot_seen" ]; then
+					reboot_seen="$last"
+					reboot_pending="$last"
+					reboot_source="$last_source"
 				fi
 			fi
 		fi
@@ -204,15 +284,28 @@ run_daemon()
 		fi
 
 		if internet_ok; then
+			if [ "$reboot_pending" -gt 0 ] 2>/dev/null; then
+				record_event reboot_recovered "$reboot_source" $((now - reboot_pending)) \
+					"重启静默期结束后外网正常"
+				reboot_pending=0
+			fi
 			if [ "$fail_since" -ne 0 ]; then
-				log "internet recovered before reboot threshold"
+				elapsed=$((now - fail_since))
+				log "internet recovered before reboot threshold (${elapsed}s)"
+				record_event offline_recovered automatic "$elapsed" "未达到重启门槛即恢复"
 			fi
 			fail_since=0
 			cooldown_reported=0
 		else
+			if [ "$reboot_pending" -gt 0 ] 2>/dev/null; then
+				record_event reboot_unrecovered "$reboot_source" $((now - reboot_pending)) \
+					"重启静默期结束后外网仍不可用"
+				reboot_pending=0
+			fi
 			if [ "$fail_since" -eq 0 ]; then
 				fail_since="$now"
-				log "internet check failed; starting 60-second confirmation window"
+				log "internet check failed; starting ${FAIL_SECONDS}-second confirmation window"
+				record_event offline_started automatic 0 "外网检测开始连续失败"
 			else
 				elapsed=$((now - fail_since))
 				if [ "$elapsed" -ge "$FAIL_SECONDS" ]; then
@@ -220,18 +313,25 @@ run_daemon()
 					if [ "$last" -gt 0 ] 2>/dev/null && [ $((now - last)) -lt "$REBOOT_COOLDOWN" ]; then
 						if [ "$cooldown_reported" -eq 0 ]; then
 							log "internet is still down, but reboot cooldown is active"
+							record_event reboot_cooldown automatic "$elapsed" "冷却期内未再次重启"
 							cooldown_reported=1
 						fi
 					else
 						log "internet down for ${elapsed}s; sending modem reboot command"
+						record_event reboot_attempt automatic "$elapsed" "达到断线门槛，发送重启命令"
 						if modem_reboot; then
-							record_reboot "$now"
+							record_reboot "$now" automatic
+							record_event reboot_accepted automatic "$elapsed" "光猫已接受重启命令"
 							quiet_until=$((now + POST_REBOOT_WAIT))
+							reboot_seen="$now"
+							reboot_pending="$now"
+							reboot_source=automatic
 							fail_since=0
 							cooldown_reported=0
 							log "checks suspended for ${POST_REBOOT_WAIT}s"
 						else
 							log "modem reboot command failed; will retry after a new confirmation window"
+							record_event reboot_failed automatic "$elapsed" "光猫重启命令失败"
 							fail_since="$now"
 						fi
 					fi
@@ -256,16 +356,26 @@ case "${1:-daemon}" in
 		;;
 	reboot-now)
 		now="$(date +%s)"
+		record_event reboot_attempt manual 0 "用户在 LuCI 手动发送重启命令"
 		if modem_reboot; then
-			record_reboot "$now"
+			record_reboot "$now" manual
+			record_event reboot_accepted manual 0 "光猫已接受手动重启命令"
 			echo "reboot command accepted; wait ${POST_REBOOT_WAIT}s"
 		else
+			record_event reboot_failed manual 0 "光猫手动重启命令失败"
 			echo "reboot command failed" >&2
 			exit 1
 		fi
 		;;
+	events)
+		show_events
+		;;
+	clear-events)
+		clear_events
+		echo "events cleared"
+		;;
 	*)
-		echo "usage: $0 {daemon|check|reboot-now}" >&2
+		echo "usage: $0 {daemon|check|reboot-now|events|clear-events}" >&2
 		exit 2
 		;;
 esac
