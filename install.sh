@@ -3,7 +3,7 @@
 set -eu
 
 APP=onu-watchdog
-ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 BACKUP_DIR="/root/${APP}-backup-$(date +%Y%m%d-%H%M%S)"
 
 [ "$(id -u)" = "0" ] || {
@@ -16,18 +16,23 @@ BACKUP_DIR="/root/${APP}-backup-$(date +%Y%m%d-%H%M%S)"
 	exit 1
 }
 
-need_packages=""
-command -v curl >/dev/null 2>&1 || need_packages="$need_packages curl"
-command -v openssl >/dev/null 2>&1 || need_packages="$need_packages openssl-util"
-command -v jsonfilter >/dev/null 2>&1 || need_packages="$need_packages jsonfilter"
+set --
+command -v curl >/dev/null 2>&1 || set -- "$@" curl
+command -v openssl >/dev/null 2>&1 || set -- "$@" openssl-util
+command -v jsonfilter >/dev/null 2>&1 || set -- "$@" jsonfilter
+command -v flock >/dev/null 2>&1 || set -- "$@" flock
 
-if [ -n "$need_packages" ]; then
-	echo "正在安装依赖：$need_packages"
+if [ "$#" -gt 0 ]; then
+	command -v opkg >/dev/null 2>&1 || {
+		echo "缺少 opkg，无法自动安装依赖：$*" >&2
+		exit 1
+	}
+	echo "正在安装依赖：$*"
 	opkg update
-	opkg install $need_packages
+	opkg install "$@"
 fi
 
-for cmd in curl openssl sha256sum awk sed jsonfilter ubus uci; do
+for cmd in curl openssl sha256sum awk sed jsonfilter flock ubus uci; do
 	command -v "$cmd" >/dev/null 2>&1 || {
 		echo "缺少必要命令：$cmd" >&2
 		exit 1
