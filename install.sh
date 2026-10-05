@@ -52,7 +52,11 @@ for file in \
 	/usr/share/rpcd/acl.d/luci-app-onu-watchdog.json \
 	/www/luci-static/resources/view/services/onu-watchdog.js \
 	/www/luci-static/resources/view/services/onu-watchdog-log.js; do
-	[ ! -e "$file" ] || cp -a "$file" "$BACKUP_DIR/"
+	if [ -e "$file" ]; then
+		backup_file="$BACKUP_DIR$file"
+		mkdir -p "$(dirname -- "$backup_file")"
+		cp -a "$file" "$backup_file"
+	fi
 done
 
 cp "$ROOT/onu-watchdog" /usr/sbin/onu-watchdog

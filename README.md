@@ -27,7 +27,7 @@ LuCI 通过 `fs.exec` 和 rpcd ACL 调用设备上的脚本，通过 UCI 读写�
 | `luci-app-onu-watchdog.menu.json` | `/usr/share/luci/menu.d/luci-app-onu-watchdog.json` | LuCI 菜单注册 |
 | `luci-app-onu-watchdog.acl.json` | `/usr/share/rpcd/acl.d/luci-app-onu-watchdog.json` | LuCI 访问控制权限 |
 
-仓库入口：[bootstrap.sh](bootstrap.sh) 下载 `main` 分支归档并调用 [install.sh](install.sh)；[uninstall.sh](uninstall.sh) 停止服务并移除插件文件。[tests/test_install_dependencies.py](tests/test_install_dependencies.py) 仅覆盖安装器的依赖预检。
+仓库入口：[bootstrap.sh](bootstrap.sh) 下载 `main` 分支归档并调用 [install.sh](install.sh)；[uninstall.sh](uninstall.sh) 停止服务并移除插件文件。`tests/` 覆盖安装器的依赖预检与文件备份。
 
 ## 设备前提与构建
 
@@ -59,7 +59,7 @@ sh install.sh
 
 **安装会执行的操作：**
 
-- **备份机制**：安装前会自动备份现有的关键文件（脚本、配置、重启状态、事件日志、网络与防火墙配置、LuCI 菜单/ACL/视图）至 `/root/onu-watchdog-backup-YYYYMMDD-HHMMSS`。
+- **备份机制**：安装前会自动备份现有的关键文件（脚本、配置、重启状态、事件日志、网络与防火墙配置、LuCI 菜单/ACL/视图）至 `/root/onu-watchdog-backup-YYYYMMDD-HHMMSS`，在目录内保留原始路径结构，例如 `usr/sbin/onu-watchdog` 和 `etc/init.d/onu-watchdog` 分别保存。所有文件备份完成后才替换代码；创建备份目录或复制失败时立即退出。旧版安装器的平铺备份可能缺失同名文件，不能用于完整回滚；生产升级与逐文件回滚见 [部署流程](docs/deployment-process.md)。
 - **网络配置**：若不存在 `network.MODEM` 接口，安装器会探测 `network.WAN.device`（逻辑接口名 `WAN` 大小写敏感）。优先使用环境变量 `MODEM_DEVICE` 指定的物理设备，否则读取 `network.WAN.device`。只有标准输入是终端时才会提示输入物理网卡名；无设备信息时安装失败，非交互安装应提前提供 `MODEM_DEVICE`。创建的 `MODEM` 使用静态地址 `192.168.1.2/24`，不设置默认路由、对端 DNS 或 IPv6 委派。
 - **防火墙配置**：分别检查 `firewall.modem` 和 `firewall.lan_to_modem`，缺失时创建 `modem` 区域及 `lan → modem` 转发。区域启用 masquerade，策略为 input/forward REJECT、output ACCEPT。已有同名网络或防火墙 section 不覆盖。
 - **配置生效**：网络或防火墙有新增配置时分别 reload；随后清理 LuCI 缓存并重启 rpcd。
@@ -175,7 +175,7 @@ logread -e onu-watchdog
 在仓库根目录执行以下命令，仅在**开发机**上执行，用于代码静态检查和单元测试，**不触发设备真实运行**。
 
 ```sh
-# 运行安装器依赖模拟测试
+# 运行安装器依赖与备份回归测试
 python3 -B -m unittest discover -s tests -v
 
 # 检查 Shell 脚本语法
@@ -197,7 +197,7 @@ shellcheck -s ash --exclude=SC1091,SC2015 onu-watchdog
 git diff --check
 ```
 
-测试只模拟安装器的依赖探测和 `opkg` 行为，不写入设备系统文件。以上检查不代替目标设备上的 LuCI、procd、网络及光猫协议验证。
+测试模拟安装器的依赖探测和 `opkg` 行为，并在临时目录执行真实备份循环，覆盖两组同名文件、完整路径与权限、缺失文件和备份失败阻止安装；不写入设备系统文件。以上检查不代替目标设备上的 LuCI、procd、网络及光猫协议验证。
 
 *ShellCheck 排除说明：SC2034/SC2154 为 OpenWrt 服务框架变量；SC1091 为设备侧动态源文件；SC2015 为预期的 `A && B || C` 逻辑。*
 
