@@ -1,5 +1,7 @@
 # 生产部署与回滚流程
 
+> 最新状态：固定提交 `7305fff` 的修复安装器已部署并验收通过，完整记录见文末“2026-10-05 23:21 升级完成记录”。此前“本次未部署”描述的是 22:43–22:44 的首次核查，作为历史证据保留。
+
 ## 本次结论（2026-10-05）
 
 已确认生产设备及可用管理入口，watchdog 已安装且运行正常。**本次未部署**：`install.sh` 的平铺备份会覆盖两组同名文件，无法提供完整的程序回滚备份，不满足本次任务要求的安全升级条件。未运行安装器、安装软件包、修改设备配置或重启服务。
@@ -172,3 +174,48 @@ tar -xzpf "$BACKUP/files.tar.gz" -C / usr/sbin/onu-watchdog
 本次设备操作仅为只读身份、文件、配置字段、软件包和健康检查；没有获取或记录光猫密码。开发机的 6 项安装依赖回归测试通过，并用临时文件验证了备份覆盖缺陷。这些依赖测试不覆盖回滚完整性。
 
 原始探测 JSON、固定提交源码归档与哈希、备份碰撞复现结果保存在本机 `/Users/tsy/LocalOps/openwrt-onu-watchdog-deploy-20261005/`，不提交这些运维产物。GitHub 仅同步本项目部署文档；本次结论是“生产目标已确认，服务健康，因备份缺陷跳过部署”。
+
+## 2026-10-05 23:21 升级完成记录
+
+### 背景与修复
+
+来源版本无法由相同运行文件确定，故以 GitHub 仓库 `vruru/openwrt-onu-watchdog` main 分支的修复提交 `7305fff34e98ebfec08bcb110d4e1a168abab26e` 为基准。修复仅针对安装器逻辑：`install.sh` 为每个文件设置 `backup_file="$BACKUP_DIR$file"`，创建其父目录后用 `cp -a` 保存，保留原 backup-first 顺序。Bootstrap 未共享此缺陷，未作改动。代码验证结果：12 个 unittest 全部通过（6 依赖 + 6 备份），所有 shell 脚本 `sh -n` 和 `shellcheck` 通过，两份 JS 的 `node --check`、JSON 解析和 `git diff --check` 通过。旧安装器备份测试结果为 4 fail / 1 error / 1 pass，证实修复必要性。
+
+### 部署前置与归档
+
+执行 `git pull --rebase` 同步仓库，无强推。GitHub 固定归档 SHA 为 `5c8bfcd467ea07663246338e635ce0784d01f8e0ef215805aad53bfc01f2e363`，包含全部 16 个 tracked files，与提交内容一致。安装器 SHA 为 `6632b108268679db6c10c0310031ae4c2ab6393fee86b8a55e41ec5a483a2bdf`。通过 PVE `.4` VM100 guest exec 确认身份为路由器 `.253`。部署前基线哈希全部一致，无未应用 `uci changes`，所有依赖命令已存在，无需运行 opkg；`network.MODEM`、`firewall.modem` 和 `firewall.lan_to_modem` 均已存在，无需交互输入。
+
+### 健康证据
+
+最终安装命令 `/bin/sh install.sh </dev/null` 于 23:21:10 执行，`install.exit=0`，PVE guest `exit=0`。23:21:25 健康检查：服务 status 返回 `running`，exit=0，UCI `enabled=1`，开机启动已启用。ubus `instance1.running=true`，PID `24262`。rpcd PID 由 23407 变更为 24185，状态 `running true`。单次 `/usr/sbin/onu-watchdog check` 输出 `internet: ok (device pppoe-WAN)`，exit=0。`logread` 仅含 3 条正常启动 `user.notice`，无警告或错误。LuCI 设置与日志页面通过已授权 guest root 临时 120 秒只读 ubus 会话获得认证 HTTP 200，预期视图 loader 存在，两 JS 文件 HTTP 200 且 SHA 与源文件一致。临时会话已销毁，`luci-auth.conf` 已删除。**注**：未执行真实浏览器登录后完整交互，Chrome 仅验证至登录页。
+
+### 首次误判与回滚
+
+首次部署于 23:19:42 执行，`install` 成功 `exit=0`。但验收脚本错误要求 `logread` 完全为空，将正常 `started` notice 误判为失败。按预案于 23:20:31 执行逐文件回滚：6 个代码路径恢复原哈希，核对后 rpcd/watchdog 恢复运行，internet check ok。配置、网络、防火墙、事件和 `last_reboot` 全部保留。首次备份 `/root/onu-watchdog-preupgrade-20261005-231841`（其中 `files.tar.gz` 的 SHA `7930f5ddd4f32e146b68c433a9433fad6bef2eef2f3845327fcf17c455e083ed`）及 installer 备份 `/root/onu-watchdog-backup-20261005-231942` 均保留未删除。修改验收标准允许精确匹配正常 `started` 通知后，再次部署同 commit 成功。
+
+### 配置状态保留
+
+受保护配置文件升级前后 SHA 完全一致，证明配置未变更：`config watchdog` SHA `baa7a3f74f699a747f67fc8e92bf8e304d3670d7c8f9395eb53624e0abb3d091`（权限 600）；`network` SHA `daf1c13fcbb79ad5a3a494cbc5960d9c63b6b65e4ab7b5632a55fb97feab45c3`；`firewall` SHA `61ca9547e07f2056bbf2d4c5330d04674c37d101bcc8e6624760bcceeb7f0f1e`；`last_reboot` SHA `f281b4313f8ce39066bc6ff1134fe49e272af49f17127f5b16d72ba8d8573333`。`events` 文件正常追加 `service_started` 记录，不覆盖历史。第二次部署前 events SHA `01248a234ad94e2b3a3235b4a702d67d01c5f6d205f543c348db4e536dbea80f`，部署后 SHA `8b662035a67f23164600ef76cac84b2aab42dc2d75de14d315fd246b607ef5a0`。全程未重启光猫/路由器，未 reload 网络/防火墙，未安装额外包。
+
+### 最终备份与运维证据
+
+最终独立备份归档 `/root/onu-watchdog-preupgrade-20261005-232101/files.tar.gz`，SHA `db58da4117aa1798e0f8d097ee0bf39719b2bdcc8f9dc04d0158e624e7309988`。`present.files` 列出 11 个原始路径，`absent.files` 为空，解压至 `verified` 目录逐路径逐哈希核对通过。安装备份目录 `/root/onu-watchdog-backup-20261005-232110`，11 个路径哈希等于独立备份。运维证据保存于本机 `/Users/tsy/LocalOps/openwrt-onu-watchdog-upgrade-20261005/`，包含 guest JSON、脚本、归档及旧版回归输出。部署验收与文档推送分别确认；本节记录的是设备上已经完成的操作。
+
+### 运行文件哈希表
+
+| 文件路径 | SHA256 |
+| :--- | :--- |
+| `/usr/sbin/onu-watchdog` | `8d9065249e6884f295a3230f526e8800b3795b7c8f5d7178f2c5d32393313604` |
+| `/etc/init.d/onu-watchdog` | `2264c21dc260506eb8582ca69714c3516f60f19b001900810c4856f69a593c1a` |
+| `/www/luci-static/resources/view/services/onu-watchdog.js` | `97717a9b4244aa73a11e62fd36b0bf3b7e3ff8fb47c76874fd6ffc9fe717c834` |
+| `/www/luci-static/resources/view/services/onu-watchdog-log.js` | `85365e0bdefc5fa4e8ed221167f46f00a1c94345b15d05ebf36b23cf57a234ca` |
+| `/usr/share/luci/menu.d/luci-app-onu-watchdog.json` | `2c73bbb674358862338cb6916f5b6c953af29a4502b8ebfbbd4fcf30321f43cd` |
+| `/usr/share/rpcd/acl.d/luci-app-onu-watchdog.json` | `009997421dca96672013670b3f8213feb0ad2122a033bdbd140dbda817b3e003` |
+
+*注：以上六运行文件升级前后相同，哈希值一致。*
+
+本次只改变安装器与开发机测试/说明，六个部署代码文件的字节内容未变化，因此升级前后哈希相同属于预期；设备实际执行固定提交安装器的证据为归档/安装器哈希、`time-install`、`install.log` 和 `install.exit`，不能只凭运行文件哈希判定安装器版本。旧安装器 SHA-256 为 `3af9ce3b83913c392201732cae20b8c9f7e662245e04c5b13a9277a651589bcc`，修复后为上述 `6632b108…`。
+
+最终健康脚本和来宾退出码均为 `0`。验收中的“日志干净”允许精确匹配正常的 `user.notice onu-watchdog: started: fail=… post-reboot-wait=… cooldown=…` 启动通知；要求没有错误、警告或其他异常，不能要求重启后日志完全为空。每次安装后的健康验收只调用一次 `check`；首次回滚另按回滚规程调用一次恢复检查。
+
+回滚准备已验证：最终独立目录与安装器备份目录权限均为 `700`，归档为 `600`，归档哈希复验通过；事件文件的备份内容仍为当前事件文件的完整前缀，历史没有覆盖。最终独立目录还保存 `rollback-code.sh`（权限 `700`、`sh -n` 通过），只逐项恢复六个代码路径并恢复原开机/运行状态，保留当前配置、事件与冷却状态。该最终备份的回滚脚本仅准备、未执行；首次备份的逐文件回滚已实际执行并验证成功。
