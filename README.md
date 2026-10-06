@@ -29,6 +29,8 @@ LuCI 通过 `fs.exec` 和 rpcd ACL 调用设备上的脚本，通过 UCI 读写�
 
 仓库入口：[bootstrap.sh](bootstrap.sh) 下载 `main` 分支归档并调用 [install.sh](install.sh)；[uninstall.sh](uninstall.sh) 停止服务并移除插件文件。`tests/` 覆盖安装器的依赖预检与文件备份。
 
+安装中途失败不自动回滚；源文件预检、阶段记录和保留现有配置/事件/冷却状态的恢复步骤见 [安装恢复指南](docs/install-recovery.md)。
+
 ## 设备前提与构建
 
 安装和运行需要带 LuCI 的 OpenWrt/iStoreOS，安装器必须以 root 身份在目标设备执行。系统需提供 BusyBox `ash` 与常用命令（包括支持脚本参数的 IPv4 `ping`）、UCI、ubus、procd、rpcd，以及 LuCI 的 `view`、`form`、`fs`、`ui` 模块。安装器检查 `/www/luci-static/resources` 是否存在，并在复制文件前检查 `curl`、`openssl`、`sha256sum`、`awk`、`sed`、`jsonfilter`、`flock`、`ubus`、`uci`。
@@ -116,7 +118,7 @@ LuCI 页面路径：`服务 → 光猫断线看门狗`，包含“运行设置�
 | `post_reboot_wait` | 重启后静默时间 (秒) | 120-1800, 默认 `300` | 重启命令发送后停止检测的时间，用于等待 PON 注册/PPPoE 拨号 |
 | `reboot_cooldown` | 重启冷却时间 (秒) | 600-86400, 默认 `21600` | 自动重启相对最后一次已接受的手动/自动重启的冷却间隔 |
 
-这些数值范围由 LuCI 表单校验；直接编辑 UCI 或旧版配置时，脚本不会执行同等的范围校验。
+这些数值范围由 LuCI 和脚本运行时同时校验。直接编辑 UCI 或旧版配置也必须是范围内整数；脚本在探测、日志写入及设备重启前拒绝非法值，前导零按十进制归一化，缺失值沿用默认值。
 
 **运行逻辑：**
 
@@ -158,8 +160,8 @@ logread -e onu-watchdog
     - 包含时间戳、事件类型、来源（自动/手动/系统）、持续时间和详情。
 - **容量限制**：
     - 硬性触发裁剪条件：行数超过 500 条 **或** 文件大小超过 128 KiB。
-    - 裁剪操作：保留最近 400 条记录。
-    - 128 KiB 是裁剪触发条件，裁剪只按行数保留 400 条，不保证裁剪后的文件必定小于 128 KiB。
+    - 裁剪先取最近 400 条，再按完整行保留不超过 128 KiB 的最新后缀；超大单条丢弃，不截断 Unicode 字符。
+    - 正常写入完成后同时满足行数与字节界限。当前 detail 来自固定状态文案和短数值，未发现远端可直接注入超长 detail 的入口；此改动是本机容量约束，不声称已存在远程 DoS。
 - **LuCI 展示**：日志页面显示最近 100 条记录，支持手动刷新和清空。运行设置页显示最近一次断线/已接受的重启，以及最近 7 天、30 天的断线和自动重启次数；统计只基于保留的日志，裁剪或清空后不代表完整期间历史。
 - **状态与锁**：`/etc/onu-watchdog.last_reboot` 保存最后一次已接受重启的时间和来源，权限为 `600`，服务重启后仍据此判断静默与冷却。事件写入和清空使用 `flock` 锁 `/var/lock/onu-watchdog-events.lock`。
 - **临时文件**：光猫登录与重启请求的 Cookie、响应正文及加密中间文件保存在 `/tmp/onu-reboot.*` 工作目录，进程退出时清理；不会写入事件或系统日志。
@@ -211,3 +213,11 @@ git diff --check
 ## 许可证
 
 [MIT License](LICENSE)。
+
+运行时用生命周期锁拒绝第二个 daemon；独立重启锁覆盖手动/自动请求和状态保存，自动路径持锁后重查冷却。锁文件不删除，进程退出释放锁。运行时锁回归需 Linux 的真实 flock；macOS 缺 flock 会跳过，完整隔离验证命令：
+
+```sh
+docker run --rm --network none --read-only --tmpfs /tmp:exec -v "$PWD:/src:ro" -w /src python:3.10-slim python -B -W error -m unittest discover -s tests -v
+```
+
+固定探测地址策略继续保留（#2）：任一可达即恢复，全失败仍不等同光猫故障。若特定网络同时屏蔽两目标，应保持看门狗停用并先做网络诊断，不能为兼容性自动更改生产目标。离线 ping mock 覆盖两个目标各自成功及全失败。

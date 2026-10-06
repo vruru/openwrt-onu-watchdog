@@ -5,6 +5,28 @@ set -eu
 APP=onu-watchdog
 ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 BACKUP_DIR="/root/${APP}-backup-$(date +%Y%m%d-%H%M%S)"
+INSTALL_STAGE=preflight
+
+set_stage()
+{
+	INSTALL_STAGE="$1"
+	if [ -d "$BACKUP_DIR" ]; then
+		printf '%s started\n' "$INSTALL_STAGE" >> "$BACKUP_DIR/install-stage.log"
+	fi
+}
+
+install_exit()
+{
+	local result="$1"
+	if [ "$result" -ne 0 ]; then
+		if [ -d "$BACKUP_DIR" ]; then
+			printf '%s failed exit=%s\n' "$INSTALL_STAGE" "$result" >> "$BACKUP_DIR/install-stage.log" || true
+		fi
+		printf '安装失败：阶段=%s，退出码=%s，备份位置=%s。保留当前配置和状态，按恢复文档处理。\n' \
+			"$INSTALL_STAGE" "$result" "$BACKUP_DIR" >&2
+	fi
+}
+trap 'install_exit "$?"' EXIT
 
 [ "$(id -u)" = "0" ] || {
 	echo "请使用 root 在 OpenWrt 上运行此安装脚本。" >&2
@@ -16,6 +38,14 @@ BACKUP_DIR="/root/${APP}-backup-$(date +%Y%m%d-%H%M%S)"
 	exit 1
 }
 
+# Fail before installing packages or touching device files if the source is incomplete.
+for source in onu-watchdog onu-watchdog.init onu_watchdog.uci \
+	luci-app-onu-watchdog.menu.json luci-app-onu-watchdog.acl.json \
+	onu-watchdog.js onu-watchdog-log.js; do
+	[ -r "$ROOT/$source" ] || { echo "缺少运行文件：$source" >&2; exit 1; }
+done
+
+set_stage dependencies
 set --
 command -v curl >/dev/null 2>&1 || set -- "$@" curl
 command -v openssl >/dev/null 2>&1 || set -- "$@" openssl-util
@@ -39,7 +69,9 @@ for cmd in curl openssl sha256sum awk sed jsonfilter flock ubus uci; do
 	}
 done
 
+set_stage backup
 mkdir -p "$BACKUP_DIR"
+printf 'backup started\n' > "$BACKUP_DIR/install-stage.log"
 for file in \
 	/usr/sbin/onu-watchdog \
 	/etc/init.d/onu-watchdog \
@@ -59,6 +91,7 @@ for file in \
 	fi
 done
 
+set_stage runtime-files
 cp "$ROOT/onu-watchdog" /usr/sbin/onu-watchdog
 cp "$ROOT/onu-watchdog.init" /etc/init.d/onu-watchdog
 mkdir -p /usr/share/luci/menu.d /usr/share/rpcd/acl.d /www/luci-static/resources/view/services
@@ -74,6 +107,7 @@ chmod 644 \
 	/www/luci-static/resources/view/services/onu-watchdog.js \
 	/www/luci-static/resources/view/services/onu-watchdog-log.js
 
+set_stage uci-config
 if [ ! -e /etc/config/onu_watchdog ]; then
 	cp "$ROOT/onu_watchdog.uci" /etc/config/onu_watchdog
 fi
@@ -128,15 +162,19 @@ if [ "$firewall_changed" = "1" ]; then
 	uci commit firewall
 fi
 
+set_stage network-reload
 [ "$network_changed" = "0" ] || /etc/init.d/network reload
+set_stage firewall-reload
 [ "$firewall_changed" = "0" ] || /etc/init.d/firewall reload
 
 rm -f /tmp/luci-indexcache
 rm -rf /tmp/luci-modulecache/* 2>/dev/null || true
+set_stage service-restart
 /etc/init.d/rpcd restart
 /etc/init.d/onu-watchdog enable
 /etc/init.d/onu-watchdog restart
 
+set_stage acceptance
 sleep 2
 if [ "$(uci -q get onu_watchdog.main.enabled)" = "1" ]; then
 	if /etc/init.d/onu-watchdog status >/dev/null 2>&1; then
@@ -153,3 +191,5 @@ LAN_IP="$(uci -q get network.lan.ipaddr || true)"
 [ -n "$LAN_IP" ] || LAN_IP='OpenWrt地址'
 echo "管理页面：http://$LAN_IP/cgi-bin/luci/admin/services/onu-watchdog"
 echo "原文件备份：$BACKUP_DIR"
+
+set_stage complete

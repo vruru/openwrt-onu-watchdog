@@ -60,7 +60,7 @@ class TestInstallBackups(unittest.TestCase):
             path.chmod(0o750 if rel in COLLISIONS[0] else 0o600)
 
     def run_backup(self, fault=''):
-        script = (f'set -eu\nTEST_ROOT={shlex.quote(str(self.root))}\n'
+        script = (f'set -eu\nset_stage() {{ :; }}\nTEST_ROOT={shlex.quote(str(self.root))}\n'
                   f'BACKUP_DIR={shlex.quote(str(self.backup))}\n'
                   + fault + '\n' + SNIPPET + '\necho INSTALL_STARTED\n')
         return subprocess.run(['/bin/sh'], input=script, text=True,
@@ -94,7 +94,7 @@ class TestInstallBackups(unittest.TestCase):
         self.assert_success(self.run_backup())
         actual = {str(path.relative_to(self.backup))
                   for path in self.backup.rglob('*') if path.is_file()}
-        self.assertEqual(actual, set(self.contents))
+        self.assertEqual(actual, set(self.contents) | {"install-stage.log"})
         for rel in self.contents:
             source, saved = self.root / rel, self.backup / rel
             self.assertEqual(sha256(saved), sha256(source), rel)
@@ -114,7 +114,7 @@ class TestInstallBackups(unittest.TestCase):
             (self.root / rel).unlink()
         self.assert_success(self.run_backup())
         self.assertTrue(self.backup.is_dir())
-        self.assertEqual(list(self.backup.iterdir()), [])
+        self.assertEqual([p.name for p in self.backup.iterdir()], ["install-stage.log"])
 
     def test_copy_failure_aborts_before_install(self):
         result = self.run_backup('''

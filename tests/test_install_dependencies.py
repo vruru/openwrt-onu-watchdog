@@ -8,7 +8,7 @@ import unittest
 
 INSTALLER = (Path(__file__).resolve().parents[1] / 'install.sh').read_text()
 START = INSTALLER.index('\nset --\n')
-END = INSTALLER.index('mkdir -p "$BACKUP_DIR"', START)
+END = INSTALLER.index('set_stage backup', START)
 SNIPPET = INSTALLER[START:END] + '\necho PREFLIGHT_OK\n'
 
 

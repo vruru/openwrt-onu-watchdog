@@ -4,6 +4,8 @@ TAG=onu-watchdog
 STATE_FILE=/etc/onu-watchdog.last_reboot
 EVENT_FILE=/etc/onu-watchdog.events
 EVENT_LOCK=/var/lock/onu-watchdog-events.lock
+DAEMON_LOCK=/var/lock/onu-watchdog-daemon.lock
+REBOOT_LOCK=/var/lock/onu-watchdog-reboot.lock
 MAX_EVENTS=500
 TRIM_EVENTS=400
 MAX_EVENT_BYTES=131072
@@ -35,6 +37,33 @@ log()
 	logger -t "$TAG" "$*"
 }
 
+# Bound and normalize decimal input before shell arithmetic or any probe.
+normalize_uint()
+{
+	local value="$1" minimum="$2" maximum="$3" field="$4"
+	case "$value" in
+		''|*[!0-9]*) log "invalid configuration: $field must be an integer in $minimum..$maximum"; return 1 ;;
+	esac
+	[ "${#value}" -le 10 ] || { log "invalid configuration: $field is too long"; return 1; }
+	value="$(printf '%s' "$value" | sed 's/^0*//')"
+	[ -n "$value" ] || value=0
+	[ "${#value}" -le 5 ] && [ "$value" -ge "$minimum" ] && [ "$value" -le "$maximum" ] || {
+		log "invalid configuration: $field must be in $minimum..$maximum"
+		return 1
+	}
+	printf '%s\n' "$value"
+}
+
+validate_config()
+{
+	CHECK_INTERVAL="$(normalize_uint "$CHECK_INTERVAL" 5 300 CHECK_INTERVAL)" || return 1
+	FAIL_SECONDS="$(normalize_uint "$FAIL_SECONDS" 30 3600 FAIL_SECONDS)" || return 1
+	POST_REBOOT_WAIT="$(normalize_uint "$POST_REBOOT_WAIT" 120 1800 POST_REBOOT_WAIT)" || return 1
+	REBOOT_COOLDOWN="$(normalize_uint "$REBOOT_COOLDOWN" 600 86400 REBOOT_COOLDOWN)" || return 1
+}
+
+validate_config || exit 1
+
 clean_event_field()
 {
 	printf '%s' "$1" | tr '\t\r\n' '   '
@@ -64,9 +93,23 @@ record_event_at()
 	bytes="$(wc -c < "$EVENT_FILE")"
 	if [ "$lines" -gt "$MAX_EVENTS" ] || [ "$bytes" -gt "$MAX_EVENT_BYTES" ]; then
 		tmp="${EVENT_FILE}.tmp.$$"
-		tail -n "$TRIM_EVENTS" "$EVENT_FILE" > "$tmp"
-		chmod 600 "$tmp"
-		mv "$tmp" "$EVENT_FILE"
+		# Retain a suffix of complete UTF-8 records under both bounds. An
+		# oversized newest record is dropped; no byte slicing of fields.
+		umask 077
+		tail -n "$TRIM_EVENTS" "$EVENT_FILE" | LC_ALL=C awk -v cap="$MAX_EVENT_BYTES" '
+			{ records[NR] = $0 }
+			END {
+				end = NR
+				while (end > 0 && length(records[end]) + 1 > cap) end--
+				start = end + 1; bytes = 0
+				for (i = end; i > 0; i--) {
+					size = length(records[i]) + 1
+					if (bytes + size > cap) break
+					bytes += size; start = i
+				}
+				for (i = start; i <= end; i++) print records[i]
+			}' > "$tmp" || { rm -f "$tmp"; return 1; }
+		chmod 600 "$tmp" && mv "$tmp" "$EVENT_FILE" || { rm -f "$tmp"; return 1; }
 	fi
 )
 
@@ -236,10 +279,37 @@ record_reboot()
 	chmod 600 "$STATE_FILE"
 }
 
+# Keep reboot requests and their receipts in the same critical section.
+# 2 means busy/cooldown: no request occurred and it is not a modem failure.
+reboot_with_state()
+(
+	local source="$1" elapsed="${2:-0}" now last
+	exec 7>"$REBOOT_LOCK" || return 1
+	flock -n 7 || { log "reboot already in progress"; return 2; }
+	now="$(date +%s)"
+	if [ "$source" = automatic ]; then
+		last="$(last_reboot)"
+		if [ "$last" -gt 0 ] 2>/dev/null && [ $((now - last)) -lt "$REBOOT_COOLDOWN" ]; then
+			log "reboot cooldown became active; request skipped"
+			return 2
+		fi
+	fi
+	record_event reboot_attempt "$source" "$elapsed" "发送光猫重启命令"
+	if modem_reboot; then
+		record_reboot "$(date +%s)" "$source" || return 1
+		record_event reboot_accepted "$source" "$elapsed" "光猫已接受重启命令"
+		return 0
+	fi
+	record_event reboot_failed "$source" "$elapsed" "光猫重启命令失败"
+	return 1
+)
+
 run_daemon()
 {
 	local fail_since=0 now last last_source elapsed quiet_until=0 candidate_quiet=0
-	local cooldown_reported=0 reboot_seen=0 reboot_pending=0 reboot_source=unknown
+	local cooldown_reported=0 reboot_seen=0 reboot_pending=0 reboot_source=unknown result
+	exec 8>"$DAEMON_LOCK" || return 1
+	flock -n 8 || { log "daemon already running; refusing a second instance"; return 2; }
 	last="$(last_reboot)"
 	last_source="$(last_reboot_source)"
 	now="$(date +%s)"
@@ -318,10 +388,8 @@ run_daemon()
 						fi
 					else
 						log "internet down for ${elapsed}s; sending modem reboot command"
-						record_event reboot_attempt automatic "$elapsed" "达到断线门槛，发送重启命令"
-						if modem_reboot; then
-							record_reboot "$now" automatic
-							record_event reboot_accepted automatic "$elapsed" "光猫已接受重启命令"
+						if reboot_with_state automatic "$elapsed"; then
+							now="$(last_reboot)"
 							quiet_until=$((now + POST_REBOOT_WAIT))
 							reboot_seen="$now"
 							reboot_pending="$now"
@@ -330,8 +398,8 @@ run_daemon()
 							cooldown_reported=0
 							log "checks suspended for ${POST_REBOOT_WAIT}s"
 						else
-							log "modem reboot command failed; will retry after a new confirmation window"
-							record_event reboot_failed automatic "$elapsed" "光猫重启命令失败"
+							result=$?
+							[ "$result" -eq 2 ] || log "modem reboot command failed; will retry after a new confirmation window"
 							fail_since="$now"
 						fi
 					fi
@@ -355,16 +423,12 @@ case "${1:-daemon}" in
 		fi
 		;;
 	reboot-now)
-		now="$(date +%s)"
-		record_event reboot_attempt manual 0 "用户在 LuCI 手动发送重启命令"
-		if modem_reboot; then
-			record_reboot "$now" manual
-			record_event reboot_accepted manual 0 "光猫已接受手动重启命令"
+		if reboot_with_state manual 0; then
 			echo "reboot command accepted; wait ${POST_REBOOT_WAIT}s"
 		else
-			record_event reboot_failed manual 0 "光猫手动重启命令失败"
-			echo "reboot command failed" >&2
-			exit 1
+			result=$?
+			echo "reboot command failed or another reboot is in progress" >&2
+			exit "$result"
 		fi
 		;;
 	events)
